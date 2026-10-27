@@ -119,6 +119,8 @@ struct OperonApp {
     retry: Option<Retry>,
     needs_screen_permission: bool,
     result_window: Option<gpui::WindowHandle<results::ResultView>>,
+    flows: Vec<Flow>,
+    selected_flow: usize,
 }
 
 impl OperonApp {
@@ -135,6 +137,7 @@ impl OperonApp {
         window.focus(&input.focus_handle(cx));
         let controller = TaskController::new();
         let service = controller.translation_binding().label;
+        let flows = preset_flows(&controller.translation_binding().instance_id, "zh-CN");
         Self {
             page: Page::Tasks,
             input,
@@ -154,6 +157,8 @@ impl OperonApp {
             retry: None,
             needs_screen_permission: false,
             result_window: None,
+            flows,
+            selected_flow: 0,
         }
     }
 
@@ -368,6 +373,10 @@ impl OperonApp {
 
     fn select_language(&mut self, language: &str, cx: &mut Context<Self>) {
         self.target_language = language.into();
+        // Keep the saved flows in step with the language the tasks will use.
+        for flow in &mut self.flows {
+            let _ = flow.set_target_language(language);
+        }
         cx.notify();
     }
 
@@ -438,13 +447,69 @@ impl OperonApp {
         cx.notify();
     }
 
+    /// Replace a step with another compatible instance. Validation happens on
+    /// the edited copy, so a rejected choice leaves the saved flow untouched.
+    fn replace_step(
+        &mut self,
+        step_id: String,
+        instance_id: String,
+        capability_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let registry = self.controller.registry_snapshot();
+        let Some(flow) = self.flows.get_mut(self.selected_flow) else {
+            return;
+        };
+        let mut edited = flow.clone();
+        match edited.replace_step(&registry, &step_id, &instance_id, &capability_id) {
+            Ok(()) => match edited.validate(&registry) {
+                Ok(()) => {
+                    *flow = edited;
+                    self.status = format!("步骤 {step_id} 已替换，保存前校验通过");
+                }
+                Err(error) => self.status = format!("未保存：{error}"),
+            },
+            Err(error) => self.status = format!("无法替换：{error}"),
+        }
+        cx.notify();
+    }
+
+    fn toggle_step(&mut self, step_id: String, enabled: bool, cx: &mut Context<Self>) {
+        let Some(flow) = self.flows.get_mut(self.selected_flow) else {
+            return;
+        };
+        match flow.set_step_enabled(&step_id, enabled) {
+            Ok(()) => {
+                self.status = format!(
+                    "步骤 {step_id} · {}",
+                    if enabled { "已启用" } else { "已停用" }
+                );
+            }
+            Err(error) => self.status = format!("{error}"),
+        }
+        cx.notify();
+    }
+
+    fn set_flow_language(&mut self, language: &str, cx: &mut Context<Self>) {
+        let Some(flow) = self.flows.get_mut(self.selected_flow) else {
+            return;
+        };
+        match flow.set_target_language(language) {
+            Ok(()) => {
+                self.target_language = language.into();
+                self.status = format!("流程目标语言已改为 {language}");
+            }
+            Err(error) => self.status = format!("{error}"),
+        }
+        cx.notify();
+    }
+
     fn action(
         &self,
         label: &str,
         id: impl Into<SharedString>,
         primary: bool,
-    ) -> gpui::Stateful<gpui::Div> {
-        div()
+    ) -> gpui::Stateful<gpui::Div> {        div()
             .id(gpui::ElementId::from(id.into()))
             .px_4()
             .py_2()
@@ -524,6 +589,160 @@ impl OperonApp {
 impl Focusable for OperonApp {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl OperonApp {
+    /// Step cards for the selected flow. Required steps expose no disable
+    /// control, matching the rule that a flow cannot be saved unrunnable.
+    fn flow_steps(&self, flow: &Flow, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let registry = self.controller.registry_snapshot();
+        let mut cards = Vec::new();
+        cards.push(
+            div()
+                .p_4()
+                .bg(rgb(0xf7faf8))
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(0xe0e7e3))
+                .flex()
+                .justify_between()
+                .items_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x63746c))
+                        .child("目标语言"),
+                )
+                .child(div().flex().gap_2().children(
+                    [("zh-CN", "中文"), ("en", "English"), ("ja", "日本語")].map(
+                        |(code, label)| {
+                            let active = flow.target_language == code;
+                            let id = format!("flow-language-{code}");
+                            div()
+                                .id(SharedString::from(id))
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .text_sm()
+                                .bg(if active {
+                                    rgb(0xdcefe8)
+                                } else {
+                                    rgba(0x00000000)
+                                })
+                                .child(label)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.set_flow_language(code, cx)
+                                    }),
+                                )
+                        },
+                    ),
+                ))
+                .into_any_element(),
+        );
+        for (index, step) in flow.workflow.steps.iter().enumerate() {
+            let step_id = step.id.clone();
+            let label = registry
+                .instance(&step.instance_id)
+                .map(|instance| instance.name.clone())
+                .unwrap_or_else(|| format!("{}（缺失）", step.instance_id));
+            let disabled = !step.enabled;
+            let toggle_on = !step.enabled;
+            let toggle_id = format!("step-toggle-{index}");
+            let mut row = div()
+                .p_4()
+                .bg(rgb(0xffffff))
+                .rounded_lg()
+                .border_1()
+                .border_color(if disabled {
+                    rgb(0xe8b7a3)
+                } else {
+                    rgb(0xe0e7e3)
+                })
+                .flex()
+                .justify_between()
+                .items_center()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!("{}. {}", index + 1, label)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x63746c))
+                                .child(if disabled {
+                                    format!("{} · 已停用", step.id)
+                                } else {
+                                    step.id.clone()
+                                }),
+                        ),
+                )
+                .child(
+                    div().flex().gap_2().items_center().when(step.optional, |this| {
+                        this.child(
+                            self.action(
+                                if toggle_on { "启用" } else { "停用" },
+                                toggle_id,
+                                false,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.toggle_step(step_id.clone(), toggle_on, cx)
+                                }),
+                            ),
+                        )
+                    }),
+                );
+            // Offer compatible replacements for the step, if any besides its
+            // current instance.
+            let choices = flow
+                .replacement_choices(&registry, &step.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|choice| choice.instance_id != step.instance_id)
+                .collect::<Vec<_>>();
+            if !choices.is_empty() {
+                let step_id = step.id.clone();
+                row = row.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(choices.into_iter().map(|choice| {
+                            let step_id = step_id.clone();
+                            let id = format!("replace-{}-{}", step_id, choice.instance_id);
+                            let label = if choice.online {
+                                format!("换用 {} · 在线", choice.label)
+                            } else {
+                                format!("换用 {} · 本地", choice.label)
+                            };
+                            self.action(&label, id, false).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.replace_step(
+                                        step_id.clone(),
+                                        choice.instance_id.clone(),
+                                        choice.capability_id.clone(),
+                                        cx,
+                                    )
+                                }),
+                            )
+                        })),
+                );
+            }
+            cards.push(row.into_any_element());
+        }
+        cards
     }
 }
 
@@ -797,33 +1016,46 @@ impl Render for OperonApp {
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(div().text_2xl().font_weight(gpui::FontWeight::SEMIBOLD).child("预设流程"))
+                .child(div().text_2xl().font_weight(gpui::FontWeight::SEMIBOLD).child("流程"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x63746c))
+                        .child("可以替换步骤使用的插件实例、修改目标语言、启停可选步骤。保存前会校验类型与配置。"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .children(self.flows.iter().enumerate().map(|(index, flow)| {
+                            let active = index == self.selected_flow;
+                            let id = format!("flow-{index}");
+                            div()
+                                .id(SharedString::from(id))
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .text_sm()
+                                .bg(if active { rgb(0xdcefe8) } else { rgb(0xffffff) })
+                                .border_1()
+                                .border_color(rgb(0xe0e7e3))
+                                .child(flow.workflow.name.clone())
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.selected_flow = index;
+                                        cx.notify();
+                                    }),
+                                )
+                        })),
+                )
                 .children(
-                    [
-                        (
-                            "截图翻译",
-                            format!("区域截图 → Vision OCR → {} → 结果浮窗", self.service),
-                        ),
-                        ("截图 OCR", "区域截图 → Vision OCR → 结果浮窗".into()),
-                        (
-                            "文本翻译",
-                            format!("文本输入 → {} → 结果浮窗", self.service),
-                        ),
-                        (
-                            "语音转译",
-                            format!("麦克风 → Apple Speech → 稳定片段 → {} → 字幕", self.service),
-                        ),
-                    ]
-                    .map(|(name, flow): (&str, String)| {
-                        div()
-                            .p_5()
-                            .bg(rgb(0xffffff))
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(rgb(0xe0e7e3))
-                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(name))
-                            .child(div().mt_2().text_sm().text_color(rgb(0x63746c)).child(flow))
-                    }),
+                    self.flows
+                        .get(self.selected_flow)
+                        .map(|flow| self.flow_steps(flow, cx))
+                        .into_iter()
+                        .flatten(),
                 )
                 .into_any_element(),
             Page::Runs => div()
@@ -908,7 +1140,7 @@ impl Render for OperonApp {
                         |(page, id, label)| {
                             let active = self.page == page;
                             div()
-                                .id(id)
+                                .id(SharedString::from(id))
                                 .px_3()
                                 .py_2()
                                 .rounded_md()

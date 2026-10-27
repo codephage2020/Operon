@@ -25,10 +25,26 @@ impl CapabilityRegistry {
         self.executors.get(id).map(|(instance, _)| instance)
     }
 
-    /// Enabled instances that can serve a text-to-text style step, returned as
-    /// (instance id, capability id) pairs so a replacement can bind both. A type
-    /// match only means the step can be connected; it does not start a task or
-    /// silently switch to another online service.
+    /// Enabled instances with any capability accepting `input`, paired with the
+    /// capability id. Callers filter the output side against what comes next.
+    pub fn compatible_input(&self, input: &DataType) -> Vec<(String, String)> {
+        let mut matches = Vec::new();
+        for (instance, _) in self.executors.values() {
+            if !instance.enabled {
+                continue;
+            }
+            for capability in &instance.capabilities {
+                if capability.input == *input && capability.mode == ExecutionMode::Once {
+                    matches.push((instance.id.clone(), capability.id.clone()));
+                }
+            }
+        }
+        matches
+    }
+
+    /// Enabled instances offering a capability with the given input and output
+    /// types. A match only means the steps can be connected; it never starts a
+    /// task or selects a service.
     pub fn compatible_with(&self, input: &DataType, output: &DataType) -> Vec<(String, String)> {
         let mut matches = Vec::new();
         for (instance, _) in self.executors.values() {

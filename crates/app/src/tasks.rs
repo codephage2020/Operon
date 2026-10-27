@@ -184,6 +184,11 @@ impl TaskController {
         registry
     }
 
+    /// Snapshot of every registered instance, for the flow editor.
+    pub fn registry_snapshot(&self) -> CapabilityRegistry {
+        self.registry()
+    }
+
     pub fn start(
         &self,
         task: String,

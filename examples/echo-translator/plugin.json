@@ -1,0 +1,19 @@
+{
+  "id": "dev.operon.echo-translator",
+  "name": "演示翻译器",
+  "version": "0.1.0",
+  "protocol": 1,
+  "executable": "operon-echo-translator",
+  "permissions": [],
+  "capabilities": [
+    {
+      "id": "translate",
+      "name": "演示文本转换",
+      "input": "text",
+      "output": "text",
+      "mode": "once",
+      "online": false,
+      "permissions": []
+    }
+  ]
+}

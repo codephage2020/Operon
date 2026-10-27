@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/*", "examples/echo-translator"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["full"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }
+
+[profile.release]
+lto = "thin"
+strip = true

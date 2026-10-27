@@ -1,0 +1,27 @@
+[package]
+name = "operon-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+operon-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue", "NSLocale"] }
+objc2-core-foundation = "0.3"
+objc2-core-graphics = { version = "0.3", features = ["CGImage", "CGWindow"] }
+objc2-image-io = { version = "0.3", features = ["CGImageSource"] }
+objc2-vision = { version = "0.3", features = ["VNRecognizeTextRequest", "VNRequestHandler", "VNObservation"] }
+objc2-speech = { version = "0.3", features = ["SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionTask", "SFSpeechRecognitionResult", "SFTranscription"] }
+objc2-av-foundation = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode", "AVAudioFormat", "AVAudioTime", "AVAudioTypes", "AVAudioBuffer", "AVAudioIONode", "AVCaptureDevice", "AVMediaFormat"] }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode", "AVAudioFormat", "AVAudioTime", "AVAudioTypes", "AVAudioBuffer", "AVAudioIONode"] }

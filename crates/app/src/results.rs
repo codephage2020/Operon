@@ -23,7 +23,9 @@ pub struct ResultState {
     pub service: String,
     pub target_language: String,
     pub failure: Option<String>,
-    pub can_retry: bool,
+    /// Whether the bound service sends content over the network. Shown in the
+    /// window so the user can tell local work from an online step.
+    pub online: bool,
     pub running: bool,
 }
 
@@ -144,8 +146,10 @@ impl Render for ResultView {
                                     .text_xs()
                                     .text_color(rgb(0x63746c))
                                     .child(format!(
-                                        "{} → {}",
-                                        self.state.service, self.state.target_language
+                                        "{} → {}{}",
+                                        self.state.service,
+                                        self.state.target_language,
+                                        if self.state.online { " · 在线" } else { "" }
                                     )),
                             )
                             .child(

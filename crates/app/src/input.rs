@@ -141,6 +141,41 @@ impl TextInput {
             self.select_to(self.index_for_mouse(event.position), window, cx);
         }
     }
+    fn key_down(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let modifiers = event.keystroke.modifiers;
+        let offset = match event.keystroke.key.as_str() {
+            "left" => self.previous(self.selected_range.start),
+            "right" => self.next(self.selected_range.end),
+            "backspace" => {
+                let end = self.selected_range.end;
+                let start = if self.selected_range.is_empty() {
+                    self.previous(end)
+                } else {
+                    self.selected_range.start
+                };
+                self.content =
+                    format!("{}{}", &self.content[..start], &self.content[end..]).into();
+                self.selected_range = start..start;
+                self.selection_reversed = false;
+                cx.emit(TextInputEvent::Changed(self.content.to_string()));
+                cx.notify();
+                return;
+            }
+            _ => return,
+        };
+        if modifiers.shift {
+            let anchor = if self.selection_reversed {
+                self.selected_range.end
+            } else {
+                self.selected_range.start
+            };
+            self.selected_range = anchor.min(offset)..anchor.max(offset);
+            self.selection_reversed = offset < anchor;
+        } else {
+            self.move_to(offset, window, cx);
+        }
+        cx.notify();
+    }
 }
 
 impl EntityInputHandler for TextInput {
@@ -429,6 +464,7 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_key_down(cx.listener(Self::key_down))
             .w_full()
             .min_h(px(96.))
             .p_3()

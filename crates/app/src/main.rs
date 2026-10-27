@@ -127,10 +127,9 @@ impl OperonApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextInput::new(cx, "输入要翻译的文本…", true));
         cx.subscribe(&input, |this, _, event: &TextInputEvent, cx| {
-            if let TextInputEvent::Changed(value) = event {
-                this.original = value.clone();
-                cx.notify();
-            }
+            let TextInputEvent::Changed(value) = event;
+            this.original = value.clone();
+            cx.notify();
         })
         .detach();
         let focus_handle = cx.focus_handle();
@@ -172,7 +171,10 @@ impl OperonApp {
             service: self.service.clone(),
             target_language: self.target_language.clone(),
             failure: self.last_failure.clone(),
-            can_retry: self.retry.is_some(),
+            online: self
+                .controller
+                .translation_binding()
+                .online,
             running: self.running,
         };
         if !open {

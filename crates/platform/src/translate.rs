@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use operon_core::*;
 use serde::Deserialize;
-use std::{collections::BTreeMap, process::Stdio};
+use std::process::Stdio;
 
 pub struct HttpTranslator {
     pub endpoint: String,
@@ -99,8 +99,7 @@ impl CapabilityExecutor for HttpTranslator {
     }
 }
 
-pub fn language_code(language: &str) -> &str {
-    match language {
+pub fn language_code(language: &str) -> &str {    match language {
         "auto" => "Autodetect",
         "zh" | "zh-CN" | "zh-Hans" => "zh-CN",
         "en" | "en-US" => "en",
@@ -110,8 +109,4 @@ pub fn language_code(language: &str) -> &str {
         "de" | "de-DE" => "de",
         other => other,
     }
-}
-
-pub fn translation_config(target: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([("target_language".into(), target.into())])
 }

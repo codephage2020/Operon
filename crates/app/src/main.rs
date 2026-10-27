@@ -1,4 +1,5 @@
 mod input;
+mod results;
 mod tasks;
 
 use gpui::{
@@ -117,6 +118,7 @@ struct OperonApp {
     speech_interim: String,
     retry: Option<Retry>,
     needs_screen_permission: bool,
+    result_window: Option<gpui::WindowHandle<results::ResultView>>,
 }
 
 impl OperonApp {
@@ -151,7 +153,31 @@ impl OperonApp {
             speech_interim: String::new(),
             retry: None,
             needs_screen_permission: false,
+            result_window: None,
         }
+    }
+
+    /// Mirror the current result into the floating window. Opening happens on
+    /// completion so a screenshot task started from another app surfaces its
+    /// translation without the user returning to the workbench.
+    fn show_result(&mut self, open: bool, cx: &mut Context<Self>) {
+        let state = results::ResultState {
+            original: self.original.clone(),
+            translated: self.translated.clone(),
+            service: self.service.clone(),
+            target_language: self.target_language.clone(),
+            failure: self.last_failure.clone(),
+            can_retry: self.retry.is_some(),
+            running: self.running,
+        };
+        if !open {
+            if let Some(handle) = self.result_window {
+                let _ = handle.update(cx, |view, _window, cx| view.set_state(state, cx));
+            }
+            return;
+        }
+        let handle = results::show(state, cx, self.result_window);
+        self.result_window = Some(handle);
     }
 
     fn start(&mut self, task: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -218,6 +244,8 @@ impl OperonApp {
                     self.retry = None;
                 }
                 self.last_failure = error;
+                let produced = !self.original.is_empty() || !self.translated.is_empty();
+                self.show_result(produced, cx);
             }
             tasks::TaskEvent::Failed {
                 output,
@@ -250,6 +278,8 @@ impl OperonApp {
                 self.cancellation = None;
                 self.status = "任务失败 · 可从失败步骤重试".into();
                 self.last_failure = Some(message);
+                // Keep the OCR text visible even when translation failed.
+                self.show_result(!self.original.is_empty(), cx);
             }
             tasks::TaskEvent::Speech {
                 interim,
@@ -1022,6 +1052,14 @@ impl OperonApp {
                                     MouseButton::Left,
                                     cx.listener(|this, _, _, cx| this.retry_failed(cx)),
                                 ),
+                        )
+                    })
+                    .when(!self.original.is_empty() || !self.translated.is_empty(), |this| {
+                        this.child(
+                            self.action("浮窗显示", "show-result", false).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.show_result(true, cx)),
+                            ),
                         )
                     }),
             )

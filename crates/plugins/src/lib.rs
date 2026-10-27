@@ -3,13 +3,12 @@ use operon_core::*;
 use std::{
     path::{Component, Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
-    sync::Mutex,
 };
 
 pub struct PluginProcess {
@@ -184,42 +183,89 @@ fn executable_path(root: &Path, value: &str) -> Result<PathBuf, CapabilityError>
 #[derive(Clone)]
 pub struct PluginManager {
     root: PathBuf,
-    instances: Arc<Mutex<Vec<InstalledPlugin>>>,
+    plugins: Arc<Mutex<Vec<InstalledPlugin>>>,
 }
 
 #[derive(Clone)]
-struct InstalledPlugin {
-    manifest: PluginManifest,
-    path: PathBuf,
-    enabled: bool,
+pub struct InstalledPlugin {
+    pub manifest: PluginManifest,
+    pub path: PathBuf,
+    pub enabled: bool,
 }
 
 impl PluginManager {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
-            instances: Arc::new(Mutex::new(Vec::new())),
+            plugins: Arc::new(Mutex::new(Vec::new())),
         }
     }
-    pub async fn install(&self, package: &Path) -> Result<PluginInstance, anyhow::Error> {
+
+    /// Load installed packages from the plugin directory so restarts keep
+    /// previously installed plugins available.
+    pub fn scan(&self) -> anyhow::Result<()> {
+        let mut found = Vec::new();
+        if self.root.is_dir() {
+            for entry in std::fs::read_dir(&self.root)? {
+                let directory = entry?.path();
+                let manifest = directory.join("plugin.json");
+                if !manifest.is_file() {
+                    continue;
+                }
+                let manifest: PluginManifest = serde_json::from_slice(&std::fs::read(manifest)?)?;
+                validate_manifest(&manifest)?;
+                found.push(InstalledPlugin {
+                    manifest,
+                    path: directory,
+                    enabled: true,
+                });
+            }
+        }
+        *self.plugins.lock().expect("plugin list lock") = found;
+        Ok(())
+    }
+
+    pub fn list(&self) -> Vec<InstalledPlugin> {
+        self.plugins.lock().expect("plugin list lock").clone()
+    }
+
+    pub fn install(&self, package: &Path) -> anyhow::Result<PluginInstance> {
+        // Accept either the package directory or its plugin.json directly.
+        let package = if package.is_dir() {
+            package.to_path_buf()
+        } else if package.file_name().is_some_and(|name| name == "plugin.json") {
+            package
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("插件包路径无效"))?
+                .to_path_buf()
+        } else {
+            anyhow::bail!("请选择包含 plugin.json 的插件包目录");
+        };
         let manifest: PluginManifest =
             serde_json::from_slice(&std::fs::read(package.join("plugin.json"))?)?;
         validate_manifest(&manifest)?;
+        executable_path(&package, &manifest.executable)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         let destination = self.root.join(&manifest.id);
         if destination.exists() {
             anyhow::bail!("插件 {} 已安装", manifest.id);
         }
-        copy_directory(package, &destination)?;
+        std::fs::create_dir_all(&self.root)?;
+        copy_directory(&package, &destination)?;
         let instance = instance(&manifest, true);
-        self.instances.lock().await.push(InstalledPlugin {
-            manifest,
-            path: destination,
-            enabled: true,
-        });
+        self.plugins
+            .lock()
+            .expect("plugin list lock")
+            .push(InstalledPlugin {
+                manifest,
+                path: destination,
+                enabled: true,
+            });
         Ok(instance)
     }
-    pub async fn set_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<()> {
-        let mut plugins = self.instances.lock().await;
+
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<()> {
+        let mut plugins = self.plugins.lock().expect("plugin list lock");
         let plugin = plugins
             .iter_mut()
             .find(|item| item.manifest.id == id)
@@ -227,8 +273,9 @@ impl PluginManager {
         plugin.enabled = enabled;
         Ok(())
     }
-    pub async fn uninstall(&self, id: &str) -> anyhow::Result<()> {
-        let mut plugins = self.instances.lock().await;
+
+    pub fn uninstall(&self, id: &str) -> anyhow::Result<()> {
+        let mut plugins = self.plugins.lock().expect("plugin list lock");
         let index = plugins
             .iter()
             .position(|item| item.manifest.id == id)
@@ -237,18 +284,24 @@ impl PluginManager {
         std::fs::remove_dir_all(plugin.path)?;
         Ok(())
     }
-    pub async fn registry(&self) -> CapabilityRegistry {
-        let mut registry = CapabilityRegistry::default();
-        for plugin in self.instances.lock().await.iter() {
-            registry.register(
-                instance(&plugin.manifest, plugin.enabled),
-                Arc::new(PluginProcess::new(
-                    plugin.manifest.clone(),
-                    plugin.path.clone(),
-                )),
-            );
-        }
-        registry
+
+    /// Executors for every installed plugin, keyed by instance ID.
+    pub fn executors(&self) -> Vec<(PluginInstance, Arc<dyn CapabilityExecutor>)> {
+        self.plugins
+            .lock()
+            .expect("plugin list lock")
+            .iter()
+            .map(|plugin| {
+                (
+                    instance(&plugin.manifest, plugin.enabled),
+                    Arc::new(PluginProcess::new(
+                        plugin.manifest.clone(),
+                        plugin.path.clone(),
+                    ))
+                        as Arc<dyn CapabilityExecutor>,
+                )
+            })
+            .collect()
     }
 }
 

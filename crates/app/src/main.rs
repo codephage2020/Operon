@@ -15,6 +15,68 @@ enum Retry {
     Task(String),
 }
 
+const BUILT_IN_CAPABILITIES: [(&str, &str, &str, &str); 4] = [
+    (
+        "macOS 区域截图",
+        "图片 → 图片",
+        "本地",
+        "系统选区 · 支持多显示器",
+    ),
+    (
+        "Vision OCR",
+        "图片 → 文本",
+        "本地",
+        "中英文识别 · 保留坐标与置信度",
+    ),
+    (
+        "MyMemory 翻译",
+        "文本 → 文本",
+        "在线",
+        "api.mymemory.translated.net · 无需密钥",
+    ),
+    (
+        "Apple Speech",
+        "音频流 → 文本流",
+        "系统服务",
+        "首次使用请求麦克风和语音识别权限",
+    ),
+];
+
+fn capability_row(
+    name: String,
+    kind: String,
+    locality: String,
+    detail: String,
+    actions: Vec<gpui::Stateful<gpui::Div>>,
+) -> impl IntoElement {
+    div()
+        .p_5()
+        .bg(rgb(0xffffff))
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(0xe0e7e3))
+        .flex()
+        .justify_between()
+        .items_center()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(name))
+                .child(div().text_sm().text_color(rgb(0x63746c)).child(kind))
+                .child(div().text_xs().text_color(rgb(0x63746c)).child(detail)),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().text_sm().text_color(rgb(0x176b5b)).child(locality))
+                .children(actions),
+        )
+}
+
 actions!(
     operon,
     [
@@ -68,15 +130,17 @@ impl OperonApp {
         .detach();
         let focus_handle = cx.focus_handle();
         window.focus(&input.focus_handle(cx));
+        let controller = TaskController::new();
+        let service = controller.translation_binding().label;
         Self {
             page: Page::Tasks,
             input,
             focus_handle,
-            controller: TaskController::new(),
+            controller,
             status: "就绪 · OCR 在本地完成".into(),
             original: String::new(),
             translated: String::new(),
-            service: "MyMemory · 在线".into(),
+            service,
             target_language: "zh-CN".into(),
             running: false,
             cancellation: None,
@@ -256,9 +320,81 @@ impl OperonApp {
         cx.notify();
     }
 
-    fn action(&self, label: &str, id: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
+    fn install_plugin(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择插件包目录或 plugin.json".into()),
+        });
+        let weak = cx.weak_entity();
+        cx.spawn(async move |_, cx| {
+            let picked = match receiver.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
+            };
+            let Some(path) = picked else { return };
+            let result = weak.update(cx, |this, cx| {
+                let outcome = this.controller.install_plugin(&path);
+                match outcome {
+                    Ok(name) => {
+                        this.status = format!("已安装插件 {name}");
+                        this.service = this.controller.translation_binding().label;
+                    }
+                    Err(error) => this.status = format!("安装失败：{error}"),
+                }
+                cx.notify();
+            });
+            let _ = result;
+        })
+        .detach();
+    }
+
+    fn toggle_plugin(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
+        match self.controller.set_plugin_enabled(&id, enabled) {
+            Ok(binding) => {
+                self.service = binding.label;
+                self.status = format!(
+                    "插件 {} · {}",
+                    id,
+                    if enabled { "已启用" } else { "已停用" }
+                );
+            }
+            Err(error) => self.status = format!("操作失败：{error}"),
+        }
+        cx.notify();
+    }
+
+    fn remove_plugin(&mut self, id: String, cx: &mut Context<Self>) {
+        match self.controller.uninstall_plugin(&id) {
+            Ok(binding) => {
+                self.service = binding.label;
+                self.status = format!("已卸载插件 {id}");
+            }
+            Err(error) => self.status = format!("卸载失败：{error}"),
+        }
+        cx.notify();
+    }
+
+    fn use_translation(&mut self, instance_id: String, cx: &mut Context<Self>) {
+        match self.controller.use_translation(&instance_id) {
+            Ok(binding) => {
+                self.service = binding.label.clone();
+                self.status = format!("翻译已切换为 {service}", service = binding.label);
+            }
+            Err(error) => self.status = format!("切换失败：{error}"),
+        }
+        cx.notify();
+    }
+
+    fn action(
+        &self,
+        label: &str,
+        id: impl Into<SharedString>,
+        primary: bool,
+    ) -> gpui::Stateful<gpui::Div> {
         div()
-            .id(id)
+            .id(gpui::ElementId::from(id.into()))
             .px_4()
             .py_2()
             .rounded_md()
@@ -487,62 +623,123 @@ impl Render for OperonApp {
                 .flex_col()
                 .gap_4()
                 .child(div().text_2xl().font_weight(gpui::FontWeight::SEMIBOLD).child("能力"))
-                .children(
-                    [
-                        (
-                            "macOS 区域截图",
-                            "输入 · 图片",
-                            "本地",
-                            "系统选区 · 支持多显示器",
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x63746c))
+                        .child("内置能力开箱即用；外部插件可安装、启停和卸载。翻译服务可在兼容实例间替换。"),
+                )
+                .children(BUILT_IN_CAPABILITIES.map(|(name, kind, locality, detail)| {
+                    capability_row(name.into(), kind.into(), locality.into(), detail.into(), Vec::new())
+                }))
+                .children(self.controller.plugins().into_iter().map(|plugin| {
+                    let id = plugin.manifest.id.clone();
+                    let kind = plugin
+                        .manifest
+                        .capabilities
+                        .iter()
+                        .map(|item| format!("{:?} → {:?}", item.input, item.output))
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    let locality = if plugin
+                        .manifest
+                        .capabilities
+                        .iter()
+                        .any(|item| item.online)
+                    {
+                        "在线"
+                    } else {
+                        "本地"
+                    };
+                    let enabled = plugin.enabled;
+                    let toggle_label = if enabled { "停用" } else { "启用" };
+                    let toggle_id = format!("toggle-{id}");
+                    let remove_id = format!("uninstall-{id}");
+                    let remove_target = id.clone();
+                    let actions = vec![
+                        self.action(toggle_label, toggle_id, !enabled).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.toggle_plugin(id.clone(), !enabled, cx)
+                            }),
                         ),
-                        (
-                            "Vision OCR",
-                            "图片 → 文本",
-                            "本地",
-                            "中英文识别 · 保留坐标与置信度",
+                        self.action("卸载", remove_id, false).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.remove_plugin(remove_target.clone(), cx)
+                            }),
                         ),
-                        (
-                            "MyMemory 翻译",
-                            "文本 → 文本",
-                            "在线",
-                            "api.mymemory.translated.net · 无需密钥",
+                    ];
+                    capability_row(
+                        plugin.manifest.name.clone(),
+                        kind,
+                        locality.into(),
+                        format!("v{} · 独立进程", plugin.manifest.version),
+                        actions,
+                    )
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            self.action("安装外部插件…", "install-plugin", true)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| this.install_plugin(cx)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x8a4326))
+                                .child("第三方插件以本地代码运行，请确认来源可信"),
                         ),
-                        (
-                            "Apple Speech",
-                            "音频流 → 文本流",
-                            "系统服务",
-                            "首次使用请求麦克风和语音识别权限",
-                        ),
-                    ]
-                    .map(|(name, kind, locality, detail)| {
-                        div()
-                            .p_5()
-                            .bg(rgb(0xffffff))
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(rgb(0xe0e7e3))
-                            .flex()
-                            .justify_between()
-                            .child(
+                )
+                .child(
+                    div()
+                        .p_5()
+                        .bg(rgb(0xffffff))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(0xe0e7e3))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("翻译服务"),
+                        )
+                        .children(self.controller.translation_choices().into_iter().map(
+                            |(instance_id, binding)| {
+                                let active = binding.instance_id
+                                    == self.controller.translation_binding().instance_id;
+                                let label = binding.label.clone();
+                                let use_id = format!("use-{instance_id}");
                                 div()
                                     .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(name))
-                                    .child(div().text_sm().text_color(rgb(0x63746c)).child(kind)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .items_end()
-                                    .gap_1()
-                                    .child(
-                                        div().text_sm().text_color(rgb(0x176b5b)).child(locality),
-                                    )
-                                    .child(div().text_xs().text_color(rgb(0x63746c)).child(detail)),
-                            )
-                    }),
+                                    .justify_between()
+                                    .items_center()
+                                    .child(div().text_sm().child(label))
+                                    .child(if active {
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x176b5b))
+                                            .child("使用中")
+                                            .into_any_element()
+                                    } else {
+                                        self.action("使用此服务", use_id, false)
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.use_translation(instance_id.clone(), cx)
+                                                }),
+                                            )
+                                            .into_any_element()
+                                    })
+                            },
+                        )),
                 )
                 .into_any_element(),
             Page::Flows => div()
@@ -554,13 +751,19 @@ impl Render for OperonApp {
                     [
                         (
                             "截图翻译",
-                            "区域截图 → Vision OCR → MyMemory 翻译 → 结果浮窗",
+                            format!("区域截图 → Vision OCR → {} → 结果浮窗", self.service),
                         ),
-                        ("截图 OCR", "区域截图 → Vision OCR → 结果浮窗"),
-                        ("文本翻译", "文本输入 → MyMemory 翻译 → 结果浮窗"),
-                        ("语音转译", "麦克风 → Apple Speech → 稳定片段 → 翻译 → 字幕"),
+                        ("截图 OCR", "区域截图 → Vision OCR → 结果浮窗".into()),
+                        (
+                            "文本翻译",
+                            format!("文本输入 → {} → 结果浮窗", self.service),
+                        ),
+                        (
+                            "语音转译",
+                            format!("麦克风 → Apple Speech → 稳定片段 → {} → 字幕", self.service),
+                        ),
                     ]
-                    .map(|(name, flow)| {
+                    .map(|(name, flow): (&str, String)| {
                         div()
                             .p_5()
                             .bg(rgb(0xffffff))

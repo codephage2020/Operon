@@ -3,8 +3,18 @@ use operon_core::*;
 use operon_platform::{
     HttpTranslator, MacSpeechRecognizer, SpeechRecognitionEvent, VisionOcr, capture_region,
 };
-use std::sync::Arc;
+use operon_plugins::PluginManager;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
+
+pub fn default_plugin_root() -> std::path::PathBuf {
+    std::env::var_os("OPERON_PLUGIN_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join("Library/Application Support/Operon/plugins")
+        })
+}
 
 #[derive(Clone, Debug)]
 pub enum TaskEvent {
@@ -48,17 +58,133 @@ async fn wait_cancel(token: CancellationToken) {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct TranslationBinding {
+    pub instance_id: String,
+    pub capability_id: String,
+    pub label: String,
+    pub online: bool,
+}
+
 pub struct TaskController {
     sender: broadcast::Sender<TaskEvent>,
+    manager: PluginManager,
+    translation: Mutex<TranslationBinding>,
 }
 
 impl TaskController {
     pub fn new() -> Self {
+        Self::with_plugin_root(default_plugin_root())
+    }
+
+    pub fn with_plugin_root(root: std::path::PathBuf) -> Self {
         let (sender, _) = broadcast::channel(256);
-        Self { sender }
+        let manager = PluginManager::new(root);
+        let _ = manager.scan();
+        Self {
+            sender,
+            manager,
+            translation: Mutex::new(TranslationBinding {
+                instance_id: "translate".into(),
+                capability_id: "translate".into(),
+                label: "MyMemory · 在线".into(),
+                online: true,
+            }),
+        }
     }
     pub fn subscribe(&self) -> broadcast::Receiver<TaskEvent> {
         self.sender.subscribe()
+    }
+
+    pub fn plugins(&self) -> Vec<operon_plugins::InstalledPlugin> {
+        self.manager.list()
+    }
+
+    pub fn install_plugin(&self, package: &std::path::Path) -> anyhow::Result<String> {
+        let instance = self.manager.install(package)?;
+        Ok(instance.name)
+    }
+
+    pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<TranslationBinding> {
+        self.manager.set_enabled(id, enabled)?;
+        Ok(self.maintain_binding())
+    }
+
+    pub fn uninstall_plugin(&self, id: &str) -> anyhow::Result<TranslationBinding> {
+        self.manager.uninstall(id)?;
+        Ok(self.maintain_binding())
+    }
+
+    /// A translation step bound to a removed or disabled instance falls back to
+    /// the built-in service so existing tasks keep working. Enabling a plugin
+    /// never switches the service by itself.
+    fn maintain_binding(&self) -> TranslationBinding {
+        let binding = self.translation.lock().expect("translation binding").clone();
+        if binding.instance_id == "translate" {
+            return binding;
+        }
+        let usable = self
+            .manager
+            .list()
+            .into_iter()
+            .any(|plugin| plugin.enabled
+                && format!("{}:default", plugin.manifest.id) == binding.instance_id);
+        if usable {
+            binding
+        } else {
+            let fallback = built_in_translation();
+            *self.translation.lock().expect("translation binding") = fallback.clone();
+            fallback
+        }
+    }
+
+    pub fn translation_binding(&self) -> TranslationBinding {
+        self.translation.lock().expect("translation binding").clone()
+    }
+
+    /// Enabled text→text instances the translate step could use. Switching
+    /// requires an explicit user action; nothing selects a service by itself.
+    pub fn translation_choices(&self) -> Vec<(String, TranslationBinding)> {
+        let registry = self.registry();
+        registry
+            .compatible_with(&DataType::Text, &DataType::Text)
+            .into_iter()
+            .map(|(instance_id, capability_id)| {
+                let instance = registry.instance(&instance_id).expect("listed instance");
+                let online = instance
+                    .capabilities
+                    .iter()
+                    .any(|item| item.id == capability_id && item.online);
+                (
+                    instance_id.clone(),
+                    TranslationBinding {
+                        instance_id,
+                        capability_id,
+                        label: format!("{} · {}", instance.name, if online { "在线" } else { "本地" }),
+                        online,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub fn use_translation(&self, instance_id: &str) -> anyhow::Result<TranslationBinding> {
+        let binding = self
+            .translation_choices()
+            .into_iter()
+            .find(|(id, _)| id == instance_id)
+            .map(|(_, binding)| binding)
+            .ok_or_else(|| anyhow::anyhow!("该服务无法处理当前文本翻译步骤"))?;
+        *self.translation.lock().expect("translation binding") = binding.clone();
+        Ok(binding)
+    }
+
+    fn registry(&self) -> CapabilityRegistry {
+        let mut registry = builtin_registry();
+        for (instance, executor) in self.manager.executors() {
+            registry.register(instance, executor);
+        }
+        registry
     }
 
     pub fn start(
@@ -69,6 +195,8 @@ impl TaskController {
         cancellation: CancellationToken,
     ) {
         let sender = self.sender.clone();
+        let registry = self.registry();
+        let binding = self.translation.lock().expect("translation binding").clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -79,21 +207,21 @@ impl TaskController {
                     speech(language, cancellation, sender).await;
                     return;
                 }
-                let engine = WorkflowEngine::new(builtin_registry());
+                let engine = WorkflowEngine::new(registry);
                 let (mut workflow, input) = if task == "text" {
                     (
                         Workflow {
                             id: task.clone(),
                             name: "文本翻译".into(),
                             input: DataType::Text,
-                            steps: vec![step("translate")],
+                            steps: vec![translate_step(&binding)],
                         },
                         Payload::Text(TextData::plain(text)),
                     )
                 } else {
                     let mut steps = vec![step("capture"), step("ocr")];
                     if task == "screenshot" {
-                        steps.push(step("translate"));
+                        steps.push(translate_step(&binding));
                     }
                     (
                         Workflow {
@@ -158,6 +286,8 @@ impl TaskController {
         cancellation: CancellationToken,
     ) {
         let sender = self.sender.clone();
+        let registry = self.registry();
+        let binding = self.translation.lock().expect("translation binding").clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -168,13 +298,13 @@ impl TaskController {
                     id: task,
                     name: "截图翻译".into(),
                     input: DataType::Image,
-                    steps: vec![step("capture"), step("ocr"), step("translate")],
+                    steps: vec![step("capture"), step("ocr"), translate_step(&binding)],
                 };
                 for step in &mut workflow.steps {
                     step.config
                         .insert("target_language".into(), language.clone());
                 }
-                match WorkflowEngine::new(builtin_registry())
+                match WorkflowEngine::new(registry)
                     .retry(&workflow, output, "translate", cancellation)
                     .await
                 {
@@ -215,6 +345,15 @@ fn original(output: &RunOutput) -> String {
         .unwrap_or_default()
 }
 
+fn builtin_display_name(id: &str) -> &str {
+    match id {
+        "capture" => "macOS 截图",
+        "ocr" => "Vision OCR",
+        "translate" => "MyMemory 翻译",
+        other => other,
+    }
+}
+
 fn builtin_registry() -> CapabilityRegistry {
     let mut registry = CapabilityRegistry::new();
     for (id, executor) in [
@@ -237,7 +376,7 @@ fn builtin_registry() -> CapabilityRegistry {
             PluginInstance {
                 id: id.into(),
                 plugin_id: id.into(),
-                name: id.into(),
+                name: builtin_display_name(id).into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 enabled: true,
                 capabilities: vec![Capability {
@@ -368,5 +507,111 @@ fn step(id: &str) -> WorkflowStep {
         config: Default::default(),
         optional: false,
         enabled: true,
+    }
+}
+
+/// The translate step keeps its stable id so retries and result lookups work
+/// regardless of which instance currently serves it.
+fn translate_step(binding: &TranslationBinding) -> WorkflowStep {
+    WorkflowStep {
+        id: "translate".into(),
+        capability_id: binding.capability_id.clone(),
+        instance_id: binding.instance_id.clone(),
+        config: Default::default(),
+        optional: false,
+        enabled: true,
+    }
+}
+
+fn built_in_translation() -> TranslationBinding {
+    TranslationBinding {
+        instance_id: "translate".into(),
+        capability_id: "translate".into(),
+        label: "MyMemory · 在线".into(),
+        online: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn package_dir(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+        let package = root.join(format!("pkg-{id}"));
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("plugin"), "#!/bin/sh\n").unwrap();
+        let manifest = PluginManifest {
+            id: id.into(),
+            name: "测试翻译器".into(),
+            version: "0.1.0".into(),
+            protocol: PROTOCOL_VERSION,
+            executable: "plugin".into(),
+            capabilities: vec![Capability {
+                id: "translate".into(),
+                name: "测试文本转换".into(),
+                input: DataType::Text,
+                output: DataType::Text,
+                mode: ExecutionMode::Once,
+                online: false,
+                permissions: Vec::new(),
+            }],
+            permissions: Vec::new(),
+        };
+        fs::write(
+            package.join("plugin.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        package
+    }
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "operon-controller-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn replacement_service_survives_until_disabled_then_falls_back() {
+        let root = temp_root("swap");
+        let controller = TaskController::with_plugin_root(root.join("plugins"));
+        assert_eq!(controller.translation_binding().instance_id, "translate");
+
+        let package = package_dir(&root, "test.translator");
+        controller.install_plugin(&package).unwrap();
+        let choices = controller.translation_choices();
+        assert!(choices.iter().any(|(id, _)| id == "test.translator:default"));
+
+        let binding = controller.use_translation("test.translator:default").unwrap();
+        assert_eq!(binding.instance_id, "test.translator:default");
+        assert!(!binding.online, "demo plugin is local; label must not claim online");
+
+        let binding = controller.set_plugin_enabled("test.translator", false).unwrap();
+        assert_eq!(binding.instance_id, "translate");
+
+        controller.set_plugin_enabled("test.translator", true).unwrap();
+        assert_eq!(
+            controller.translation_binding().instance_id,
+            "translate",
+            "enabling a plugin must not switch the service by itself"
+        );
+
+        let binding = controller.uninstall_plugin("test.translator").unwrap();
+        assert_eq!(binding.instance_id, "translate");
+        assert!(controller.plugins().is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unknown_service_is_rejected_without_changing_binding() {
+        let root = temp_root("reject");
+        let controller = TaskController::with_plugin_root(root.join("plugins"));
+        assert!(controller.use_translation("nope:default").is_err());
+        assert_eq!(controller.translation_binding().instance_id, "translate");
+        let _ = fs::remove_dir_all(&root);
     }
 }

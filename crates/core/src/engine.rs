@@ -25,6 +25,28 @@ impl CapabilityRegistry {
         self.executors.get(id).map(|(instance, _)| instance)
     }
 
+    /// Enabled instances that can serve a text-to-text style step, returned as
+    /// (instance id, capability id) pairs so a replacement can bind both. A type
+    /// match only means the step can be connected; it does not start a task or
+    /// silently switch to another online service.
+    pub fn compatible_with(&self, input: &DataType, output: &DataType) -> Vec<(String, String)> {
+        let mut matches = Vec::new();
+        for (instance, _) in self.executors.values() {
+            if !instance.enabled {
+                continue;
+            }
+            for capability in &instance.capabilities {
+                if capability.input == *input
+                    && capability.output == *output
+                    && capability.mode == ExecutionMode::Once
+                {
+                    matches.push((instance.id.clone(), capability.id.clone()));
+                }
+            }
+        }
+        matches
+    }
+
     pub fn validate(&self, workflow: &Workflow) -> Result<(), EngineError> {
         let mut expected = workflow.input.clone();
         for step in workflow.steps.iter().filter(|step| step.enabled) {
@@ -203,8 +225,14 @@ impl WorkflowEngine {
                 .expect("validated executor")
                 .1
                 .clone();
+            let mut config = step.config.clone();
+            // Plugin processes select which declared capability handles the
+            // request; the step already names it, so bind it here.
+            config
+                .entry("capability_id".into())
+                .or_insert_with(|| step.capability_id.clone());
             let context = ExecutionContext {
-                config: step.config.clone(),
+                config,
                 cancellation: cancellation.clone(),
                 events: Some(events.clone()),
             };

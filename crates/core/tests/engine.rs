@@ -116,6 +116,7 @@ fn setup_with_ocr_text(
                 config: BTreeMap::new(),
                 optional: false,
                 enabled: true,
+                timeout: None,
             })
             .collect(),
     };

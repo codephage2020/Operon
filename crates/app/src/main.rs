@@ -85,6 +85,7 @@ actions!(
         CopyOriginal,
         CopyTranslation,
         OpenScreenshot,
+        OpenScreenshotOcr,
         OpenTranslation,
         OpenSpeech
     ]
@@ -313,6 +314,26 @@ impl OperonApp {
             self.status = "仍未检测到屏幕录制权限，授予后需要重新检查".into();
         }
         cx.notify();
+    }
+
+    /// A system-wide hotkey fired, possibly while another app was frontmost.
+    /// Bring the window forward so the result is visible, then start or cancel
+    /// the same task the in-window shortcut would.
+    fn hotkey(&mut self, hotkey: operon_platform::Hotkey, window: &mut Window, cx: &mut Context<Self>) {
+        use operon_platform::Hotkey;
+        window.activate_window();
+        match hotkey {
+            Hotkey::ScreenshotTranslate => self.start("screenshot", window, cx),
+            Hotkey::ScreenshotOcr => self.start("ocr", window, cx),
+            Hotkey::TranslateText => {
+                self.page = Page::Tasks;
+                window.focus(&self.input.focus_handle(cx));
+                self.status = "输入文本后按 ⌘↩ 翻译".into();
+                cx.notify();
+            }
+            Hotkey::StartSpeech => self.start("speech", window, cx),
+            Hotkey::Cancel => self.cancel(cx),
+        }
     }
 
     fn select_language(&mut self, language: &str, cx: &mut Context<Self>) {
@@ -823,6 +844,12 @@ impl Render for OperonApp {
             .on_action(cx.listener(|this, _: &OpenScreenshot, window, cx| {
                 this.start("screenshot", window, cx)
             }))
+            .on_action(cx.listener(|this, _: &OpenScreenshotOcr, window, cx| {
+                this.start("ocr", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenSpeech, window, cx| {
+                this.start("speech", window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenTranslation, window, cx| this.start("text", window, cx)),
             )
@@ -1007,6 +1034,9 @@ fn main() {
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("escape", Cancel, None),
             KeyBinding::new("ctrl-alt-t", OpenScreenshot, None),
+            KeyBinding::new("ctrl-alt-o", OpenScreenshotOcr, None),
+            KeyBinding::new("ctrl-alt-s", OpenTranslation, None),
+            KeyBinding::new("ctrl-alt-r", OpenSpeech, None),
             KeyBinding::new("cmd-enter", OpenTranslation, None),
         ]);
         cx.on_action(|_: &Quit, cx| {
@@ -1014,19 +1044,58 @@ fn main() {
             cx.quit();
         });
         let bounds = Bounds::centered(None, size(px(1080.), px(800.)), cx);
+        let (hotkeys, failed) = operon_platform::register_all();
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
             |window, cx| {
-                let view = cx.new(|cx| OperonApp::new(window, cx));
+                let view = cx.new(|cx| {
+                    let mut app = OperonApp::new(window, cx);
+                    if !failed.is_empty() {
+                        let lost = failed
+                            .iter()
+                            .map(|hotkey| hotkey.label())
+                            .collect::<Vec<_>>()
+                            .join("、");
+                        app.status = format!("以下全局快捷键已被其他应用占用：{lost}");
+                    }
+                    app
+                });
                 let mut receiver = view.read(cx).controller.subscribe();
                 cx.spawn({
                     let view = view.clone();
                     async move |cx| {
                         while let Ok(event) = receiver.recv().await {
                             view.update(cx, |this, cx| this.receive(event, cx)).ok();
+                        }
+                    }
+                })
+                .detach();
+                // Drain system-wide hotkey presses on the UI thread. Carbon
+                // delivers on the main loop, so a short timer polls the channel
+                // and dispatches with the window in hand.
+                window.spawn(cx, {
+                    let view = view.clone();
+                    async move |cx| {
+                        loop {
+                            match hotkeys.try_recv() {
+                                Ok(hotkey) => {
+                                    let alive = cx.update_window_entity(
+                                        &view,
+                                        |this, window, cx| this.hotkey(hotkey, window, cx),
+                                    );
+                                    if alive.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                            }
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(30))
+                                .await;
                         }
                     }
                 })

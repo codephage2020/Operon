@@ -236,9 +236,13 @@ impl WorkflowEngine {
                 cancellation: cancellation.clone(),
                 events: Some(events.clone()),
             };
-            let result =
-                tokio::time::timeout(DEFAULT_TIMEOUT, executor.execute(current.clone(), context))
-                    .await;
+            let executing = executor.execute(current.clone(), context);
+            let result = match step.timeout_or_default() {
+                Some(timeout) => tokio::time::timeout(timeout, executing).await.map_err(|_| ()),
+                // Interactive steps run unbounded; the executor watches the
+                // cancellation token, so a stuck call can still be cancelled.
+                None => Ok(executing.await),
+            };
             running.duration_ms = Some(started.elapsed().as_millis());
             match result {
                 Ok(Ok(payload)) => {

@@ -45,10 +45,7 @@ impl CapabilityExecutor for Screenshot {
         _: Payload,
         context: ExecutionContext,
     ) -> Result<Payload, CapabilityError> {
-        if context.cancellation.is_cancelled() {
-            return Err(CapabilityError::Cancelled);
-        }
-        tokio::select! { result = capture_region() => result, _ = wait_cancel(context.cancellation) => Err(CapabilityError::Cancelled) }
+        capture_region(context.cancellation).await
     }
 }
 
@@ -507,6 +504,9 @@ fn step(id: &str) -> WorkflowStep {
         config: Default::default(),
         optional: false,
         enabled: true,
+        // The capture step waits for the user to frame a region, so it is paced
+        // by cancellation rather than a fixed timeout.
+        timeout: (id == "capture").then_some(None),
     }
 }
 
@@ -520,6 +520,7 @@ fn translate_step(binding: &TranslationBinding) -> WorkflowStep {
         config: Default::default(),
         optional: false,
         enabled: true,
+        timeout: None,
     }
 }
 

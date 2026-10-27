@@ -114,6 +114,20 @@ pub struct WorkflowStep {
     pub config: BTreeMap<String, String>,
     pub optional: bool,
     pub enabled: bool,
+    /// User-interactive steps (like a screenshot selection) are paced by
+    /// cancellation instead of a fixed timeout. `Some(None)` opts out of the
+    /// default timeout; `None` uses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Option<Duration>>,
+}
+
+impl WorkflowStep {
+    pub fn timeout_or_default(&self) -> Option<Duration> {
+        match self.timeout {
+            Some(timeout) => timeout,
+            None => Some(DEFAULT_TIMEOUT),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

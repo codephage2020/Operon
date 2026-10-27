@@ -117,6 +117,9 @@ pub enum EngineError {
 pub struct WorkflowEngine {
     pub registry: CapabilityRegistry,
     history: Mutex<Vec<RunRecord>>,
+    /// Optional live step updates, so the UI can show progress instead of
+    /// waiting for the whole run to finish.
+    events: Option<mpsc::UnboundedSender<RunEvent>>,
 }
 
 impl WorkflowEngine {
@@ -124,8 +127,15 @@ impl WorkflowEngine {
         Self {
             registry,
             history: Mutex::new(Vec::new()),
+            events: None,
         }
     }
+
+    pub fn with_events(mut self, events: mpsc::UnboundedSender<RunEvent>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
     pub fn history(&self) -> Vec<RunRecord> {
         self.history.lock().expect("history lock").clone()
     }
@@ -204,6 +214,7 @@ impl WorkflowEngine {
             return Err(EngineError::Validation("重试输入类型不匹配".into()));
         }
         let (events, _) = mpsc::unbounded_channel();
+        let observer = self.events.clone();
         let mut record = RunRecord {
             id: uuid::Uuid::new_v4().to_string(),
             workflow_id: workflow.id.clone(),
@@ -233,6 +244,9 @@ impl WorkflowEngine {
                 error: None,
             };
             record.steps.push(running.clone());
+            if let Some(observer) = &observer {
+                let _ = observer.send(RunEvent::Step(running.clone()));
+            }
             let started = Instant::now();
             let executor = self
                 .registry
@@ -275,7 +289,12 @@ impl WorkflowEngine {
                 Ok(Err(error)) => {
                     running.status = StepStatus::Failed;
                     running.error = Some(error.to_string());
-                    record.steps.last_mut().map(|item| *item = running);
+                    if let Some(item) = record.steps.last_mut() {
+                        *item = running.clone();
+                    }
+                    if let Some(observer) = &observer {
+                        let _ = observer.send(RunEvent::Step(running.clone()));
+                    }
                     self.remember(record.clone());
                     return Err(EngineError::Step {
                         step_id: step.id.clone(),
@@ -287,7 +306,12 @@ impl WorkflowEngine {
                     cancellation.cancel();
                     running.status = StepStatus::Failed;
                     running.error = Some("插件执行超时，已终止本次调用".into());
-                    record.steps.last_mut().map(|item| *item = running);
+                    if let Some(item) = record.steps.last_mut() {
+                        *item = running.clone();
+                    }
+                    if let Some(observer) = &observer {
+                        let _ = observer.send(RunEvent::Step(running.clone()));
+                    }
                     self.remember(record.clone());
                     return Err(EngineError::Step {
                         step_id: step.id.clone(),
@@ -296,7 +320,12 @@ impl WorkflowEngine {
                     });
                 }
             }
-            record.steps.last_mut().map(|item| *item = running);
+            if let Some(item) = record.steps.last_mut() {
+                        *item = running.clone();
+                    }
+            if let Some(observer) = &observer {
+                let _ = observer.send(RunEvent::Step(running.clone()));
+            }
         }
         self.remember(record.clone());
         Ok(RunOutput { record, outputs })

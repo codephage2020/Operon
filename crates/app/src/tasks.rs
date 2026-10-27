@@ -19,6 +19,8 @@ pub fn default_plugin_root() -> std::path::PathBuf {
 #[derive(Clone, Debug)]
 pub enum TaskEvent {
     Steps(Vec<StepRecord>),
+    /// A single step changed state mid-run, so the run detail updates live.
+    StepChanged(StepRecord),
     Original(String),
     Finished {
         original: String,
@@ -209,7 +211,17 @@ impl TaskController {
                     speech(language, cancellation, sender).await;
                     return;
                 }
-                let engine = WorkflowEngine::new(registry);
+                let engine = {
+                    let (step_events, mut step_receiver) = mpsc::unbounded_channel();
+                    let live = sender.clone();
+                    // Forward step transitions to the UI as they happen.
+                    tokio::spawn(async move {
+                        while let Some(RunEvent::Step(step)) = step_receiver.recv().await {
+                            let _ = live.send(TaskEvent::StepChanged(step));
+                        }
+                    });
+                    WorkflowEngine::new(registry).with_events(step_events)
+                };
                 let (mut workflow, input) = if task == "text" {
                     (
                         Workflow {
@@ -306,9 +318,18 @@ impl TaskController {
                     step.config
                         .insert("target_language".into(), language.clone());
                 }
-                match WorkflowEngine::new(registry)
-                    .retry(&workflow, output, "translate", cancellation)
-                    .await
+                match {
+                    let (step_events, mut step_receiver) = mpsc::unbounded_channel();
+                    let live = sender.clone();
+                    tokio::spawn(async move {
+                        while let Some(RunEvent::Step(step)) = step_receiver.recv().await {
+                            let _ = live.send(TaskEvent::StepChanged(step));
+                        }
+                    });
+                    WorkflowEngine::new(registry).with_events(step_events)
+                }
+                .retry(&workflow, output, "translate", cancellation)
+                .await
                 {
                     Ok(output) => {
                         let _ = sender.send(TaskEvent::Steps(output.record.steps.clone()));

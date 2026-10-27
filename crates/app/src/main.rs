@@ -43,8 +43,18 @@ const BUILT_IN_CAPABILITIES: [(&str, &str, &str, &str); 4] = [
     ),
 ];
 
-fn capability_row(
-    name: String,
+fn step_status_label(status: &StepStatus) -> &'static str {
+    match status {
+        StepStatus::Pending => "等待",
+        StepStatus::Running => "运行中",
+        StepStatus::Succeeded => "成功",
+        StepStatus::Failed => "失败",
+        StepStatus::Skipped => "跳过",
+        StepStatus::Cancelled => "已取消",
+    }
+}
+
+fn capability_row(    name: String,
     kind: String,
     locality: String,
     detail: String,
@@ -227,6 +237,16 @@ impl OperonApp {
     fn receive(&mut self, event: tasks::TaskEvent, cx: &mut Context<Self>) {
         match event {
             tasks::TaskEvent::Steps(steps) => self.run_steps = steps,
+            tasks::TaskEvent::StepChanged(step) => {
+                match self
+                    .run_steps
+                    .iter_mut()
+                    .find(|item| item.step_id == step.step_id)
+                {
+                    Some(existing) => *existing = step,
+                    None => self.run_steps.push(step),
+                }
+            }
             tasks::TaskEvent::Original(text) => {
                 self.original = text.clone();
                 self.input
@@ -1064,31 +1084,98 @@ impl Render for OperonApp {
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(div().text_2xl().font_weight(gpui::FontWeight::SEMIBOLD).child("最近一次运行"))
-                .children(self.run_steps.iter().map(|step| {
+                .child(
                     div()
+                        .text_2xl()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("最近一次运行"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x63746c))
+                        .child("默认日志不记录截图、识别文本、译文与密钥。"),
+                )
+                .children(self.run_steps.iter().enumerate().map(|(index, step)| {
+                    let instance = self
+                        .controller
+                        .registry_snapshot()
+                        .instance(&step.instance_id)
+                        .map(|item| (item.name.clone(), item.capabilities.clone()));
+                    let online = instance
+                        .as_ref()
+                        .is_some_and(|(_, capabilities)| {
+                            capabilities
+                                .iter()
+                                .any(|item| item.id == step.capability_id && item.online)
+                        });
+                    let name = instance
+                        .map(|(name, _)| name)
+                        .unwrap_or_else(|| step.instance_id.clone());
+                    let status_color = match step.status {
+                        StepStatus::Succeeded => rgb(0x176b5b),
+                        StepStatus::Failed => rgb(0xb14232),
+                        StepStatus::Running => rgb(0x8a6d1f),
+                        _ => rgb(0x7b8a83),
+                    };
+                    div()
+                        .id(SharedString::from(format!("run-step-{index}")))
                         .p_4()
                         .bg(rgb(0xffffff))
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(0xe0e7e3))
+                        .border_color(if step.status == StepStatus::Failed {
+                            rgb(0xe8b7a3)
+                        } else {
+                            rgb(0xe0e7e3)
+                        })
                         .flex()
-                        .justify_between()
+                        .flex_col()
+                        .gap_2()
                         .child(
-                            div().child(step.capability_id.clone()).child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x63746c))
-                                    .child(step.instance_id.clone()),
-                            ),
+                            div()
+                                .flex()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .child(format!(
+                                            "{}. {}",
+                                            index + 1,
+                                            if name.is_empty() {
+                                                step.capability_id.as_str()
+                                            } else {
+                                                name.as_str()
+                                            }
+                                        ))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x63746c))
+                                                .child(format!(
+                                                    "{}{}",
+                                                    step.instance_id,
+                                                    if online { " · 在线" } else { "" }
+                                                )),
+                                        ),
+                                )
+                                .child(div().text_sm().text_color(status_color).child(format!(
+                                    "{} · {}ms",
+                                    step_status_label(&step.status),
+                                    step.duration_ms.unwrap_or(0)
+                                ))),
                         )
-                        .child(div().text_sm().child(format!(
-                            "{:?} · {}ms",
-                            step.status,
-                            step.duration_ms.unwrap_or(0)
-                        )))
+                        .when_some(step.error.clone(), |this, error| {
+                            this.child(div().text_sm().text_color(rgb(0xb14232)).child(error))
+                        })
                 }))
-                .when(self.run_steps.is_empty(), |this| this.child("尚未运行任务"))
+                .when(self.run_steps.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x7b8a83))
+                            .child("尚未运行任务"),
+                    )
+                })
                 .into_any_element(),
         };
         div()

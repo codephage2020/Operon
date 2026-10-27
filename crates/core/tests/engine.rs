@@ -317,6 +317,101 @@ async fn history_keeps_only_the_latest_hundred_runs() {
     assert!(history.windows(2).all(|pair| pair[0].id != pair[1].id));
 }
 
+#[tokio::test]
+async fn live_events_report_running_then_terminal_per_step() {
+    let ocr_calls = Arc::new(AtomicUsize::new(0));
+    let translate_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = CapabilityRegistry::default();
+    for (id, input, output, calls) in [
+        ("ocr", DataType::Image, DataType::Text, ocr_calls),
+        ("translate", DataType::Text, DataType::Text, translate_calls),
+    ] {
+        registry.register(
+            PluginInstance {
+                id: id.into(),
+                plugin_id: id.into(),
+                name: id.into(),
+                version: "1".into(),
+                enabled: true,
+                capabilities: vec![Capability {
+                    id: id.into(),
+                    name: id.into(),
+                    input: input.clone(),
+                    output: output.clone(),
+                    mode: ExecutionMode::Once,
+                    online: false,
+                    permissions: Vec::new(),
+                }],
+                config: BTreeMap::new(),
+                endpoint: None,
+            },
+            Arc::new(TestCapability {
+                input,
+                output,
+                fail: false,
+                cancel: false,
+                text: "译文",
+                calls,
+            }),
+        );
+    }
+    let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let engine = WorkflowEngine::new(registry).with_events(events);
+    let workflow = Workflow {
+        id: "live".into(),
+        name: "实时".into(),
+        input: DataType::Image,
+        steps: ["ocr", "translate"]
+            .into_iter()
+            .map(|id| WorkflowStep {
+                id: id.into(),
+                capability_id: id.into(),
+                instance_id: id.into(),
+                config: BTreeMap::new(),
+                optional: false,
+                enabled: true,
+                timeout: None,
+            })
+            .collect(),
+    };
+    engine
+        .run(&workflow, image(), CancellationToken::default())
+        .await
+        .unwrap();
+
+    let mut observed = Vec::new();
+    while let Ok(RunEvent::Step(step)) = receiver.try_recv() {
+        observed.push((step.step_id, step.status));
+    }
+    assert_eq!(
+        observed,
+        vec![
+            ("ocr".to_string(), StepStatus::Running),
+            ("ocr".to_string(), StepStatus::Succeeded),
+            ("translate".to_string(), StepStatus::Running),
+            ("translate".to_string(), StepStatus::Succeeded),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn failing_step_reports_a_terminal_event() {
+    let (mut engine, workflow, _, _) = setup(true);
+    let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    engine = engine.with_events(events);
+    assert!(
+        engine
+            .run(&workflow, image(), CancellationToken::default())
+            .await
+            .is_err()
+    );
+    let mut observed = Vec::new();
+    while let Ok(RunEvent::Step(step)) = receiver.try_recv() {
+        observed.push((step.step_id, step.status));
+    }
+    assert!(observed.contains(&("translate".to_string(), StepStatus::Failed)));
+}
+
 #[test]
 fn workflow_export_contains_no_secrets_or_results() {
     let (_, workflow, _, _) = setup(false);

@@ -164,12 +164,54 @@ fn replacement_choices_exclude_incompatible_instances() {
 }
 
 #[test]
+fn flows_round_trip_through_disk_without_secrets() {
+    let directory = std::env::temp_dir().join(format!(
+        "operon-flow-{}",
+        std::process::id()
+    ));
+    let path = directory.join("flows.json");
+    let mut flows = preset_flows("translate", "zh-CN");
+    flows[0].set_target_language("ja").unwrap();
+    save_flows(&path, &flows).unwrap();
+
+    let bytes = std::fs::read_to_string(&path).unwrap();
+    assert!(!bytes.contains("api_key"));
+    let (loaded, warning) = load_flows(&path, preset_flows("translate", "zh-CN"));
+    assert!(warning.is_none());
+    assert_eq!(loaded.len(), flows.len());
+    assert_eq!(loaded[0].target_language, "ja");
+    loaded[0].validate(&registry()).unwrap();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn corrupt_or_missing_files_fall_back_to_presets() {
+    let directory = std::env::temp_dir().join(format!(
+        "operon-flow-bad-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("flows.json");
+
+    // Missing file: silent fallback, nothing to warn about.
+    let (flows, warning) = load_flows(&path, preset_flows("translate", "zh-CN"));
+    assert_eq!(flows.len(), 3);
+    assert!(warning.is_none());
+
+    // Corrupt file: presets still available, and the user is told why.
+    std::fs::write(&path, b"{not json").unwrap();
+    let (flows, warning) = load_flows(&path, preset_flows("translate", "zh-CN"));
+    assert_eq!(flows.len(), 3);
+    assert!(warning.is_some());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn replacement_choices_respect_the_downstream_type() {
     let registry = registry();
     let mut flow = flow();
-    // Insert a step that turns text back into an image is not a P0 concept, so
-    // instead confirm that a text step before a text step is accepted while the
-    // OCR step (which must output text into translate) rejects image output.
+    // The OCR step must receive an image from capture and emit text into
+    // translate, so only image→text instances may replace it.
     let choices = flow.replacement_choices(&registry, "ocr").unwrap();
     let ids: Vec<&str> = choices.iter().map(|item| item.instance_id.as_str()).collect();
     assert_eq!(ids, vec!["ocr"], "only image→text instances may replace OCR");

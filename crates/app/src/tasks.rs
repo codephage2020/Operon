@@ -219,6 +219,7 @@ impl TaskController {
         task: String,
         text: String,
         language: String,
+        saved_flow: Option<Workflow>,
         cancellation: CancellationToken,
     ) {
         let sender = self.sender.clone();
@@ -247,8 +248,19 @@ impl TaskController {
                         .with_events(step_events)
                         .with_secrets(Arc::new(KeychainSecrets))
                 };
-                let (mut workflow, input) = if task == "text" {
-                    (
+                let (mut workflow, input) = match saved_flow {
+                    Some(workflow) => {
+                        let input = if workflow.input == DataType::Text {
+                            Payload::Text(TextData::plain(text))
+                        } else {
+                            Payload::Image {
+                                path: "".into(),
+                                format: "png".into(),
+                            }
+                        };
+                        (workflow, input)
+                    }
+                    None if task == "text" => (
                         Workflow {
                             id: task.clone(),
                             name: "文本翻译".into(),
@@ -256,24 +268,25 @@ impl TaskController {
                             steps: vec![translate_step(&binding)],
                         },
                         Payload::Text(TextData::plain(text)),
-                    )
-                } else {
-                    let mut steps = vec![step("capture"), step("ocr")];
-                    if task == "screenshot" {
-                        steps.push(translate_step(&binding));
+                    ),
+                    None => {
+                        let mut steps = vec![step("capture"), step("ocr")];
+                        if task == "screenshot" {
+                            steps.push(translate_step(&binding));
+                        }
+                        (
+                            Workflow {
+                                id: task.clone(),
+                                name: "截图任务".into(),
+                                input: DataType::Image,
+                                steps,
+                            },
+                            Payload::Image {
+                                path: "".into(),
+                                format: "png".into(),
+                            },
+                        )
                     }
-                    (
-                        Workflow {
-                            id: task.clone(),
-                            name: "截图任务".into(),
-                            input: DataType::Image,
-                            steps,
-                        },
-                        Payload::Image {
-                            path: "".into(),
-                            format: "png".into(),
-                        },
-                    )
                 };
                 for step in &mut workflow.steps {
                     step.config

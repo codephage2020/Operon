@@ -4,7 +4,7 @@ mod model;
 mod speech;
 
 pub use engine::{CapabilityRegistry, EngineError, WorkflowEngine};
-pub use flow::{Flow, FlowError, Replacement, preset_flows};
+pub use flow::{Flow, FlowError, Replacement, load_flows, preset_flows, save_flows};
 pub use model::*;
 pub use speech::{SegmentUpdate, SpeechCoordinator, SpeechEvent, SpeechStatus};
 

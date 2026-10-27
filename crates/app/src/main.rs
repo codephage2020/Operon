@@ -43,8 +43,17 @@ const BUILT_IN_CAPABILITIES: [(&str, &str, &str, &str); 4] = [
     ),
 ];
 
-fn step_status_label(status: &StepStatus) -> &'static str {
-    match status {
+fn flows_path() -> std::path::PathBuf {
+    std::env::var_os("OPERON_CONFIG_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join("Library/Application Support/Operon")
+        })
+        .join("flows.json")
+}
+
+fn step_status_label(status: &StepStatus) -> &'static str {    match status {
         StepStatus::Pending => "等待",
         StepStatus::Running => "运行中",
         StepStatus::Succeeded => "成功",
@@ -150,13 +159,14 @@ impl OperonApp {
         window.focus(&input.focus_handle(cx));
         let controller = TaskController::new();
         let service = controller.translation_binding().label;
-        let flows = preset_flows(&controller.translation_binding().instance_id, "zh-CN");
+        let presets = preset_flows(&controller.translation_binding().instance_id, "zh-CN");
+        let (flows, flow_warning) = load_flows(&flows_path(), presets);
         Self {
             page: Page::Tasks,
             input,
             focus_handle,
             controller,
-            status: "就绪 · OCR 在本地完成".into(),
+            status: flow_warning.unwrap_or_else(|| "就绪 · OCR 在本地完成".into()),
             original: String::new(),
             translated: String::new(),
             service,
@@ -231,10 +241,14 @@ impl OperonApp {
         self.translated.clear();
         self.run_steps.clear();
         self.cancellation = Some(CancellationToken::default());
+        // Run the saved flow that matches this task, so edits made on the flow
+        // page (replaced instances, disabled optional steps) take effect.
+        let workflow = self.workflow_for(task);
         self.controller.start(
             task.into(),
             self.original.clone(),
             self.target_language.clone(),
+            workflow,
             self.cancellation.clone().unwrap(),
         );
         cx.notify();
@@ -359,14 +373,33 @@ impl OperonApp {
                 self.target_language.clone(),
                 self.cancellation.clone().unwrap(),
             ),
-            Retry::Task(task) => self.controller.start(
-                task,
-                self.original.clone(),
-                self.target_language.clone(),
-                self.cancellation.clone().unwrap(),
-            ),
+            Retry::Task(task) => {
+                let workflow = self.workflow_for(&task);
+                self.controller.start(
+                    task,
+                    self.original.clone(),
+                    self.target_language.clone(),
+                    workflow,
+                    self.cancellation.clone().unwrap(),
+                )
+            }
         }
         cx.notify();
+    }
+
+    /// The saved flow backing a task id, so edits apply consistently to first
+    /// runs and retries alike.
+    fn workflow_for(&self, task: &str) -> Option<Workflow> {
+        let flow_id = match task {
+            "screenshot" => "screenshot-translate",
+            "ocr" => "screenshot-ocr",
+            "text" => "text-translate",
+            _ => return None,
+        };
+        self.flows
+            .iter()
+            .find(|flow| flow.workflow.id == flow_id)
+            .map(|flow| flow.workflow.clone())
     }
 
     fn check_screen_permission(&mut self, cx: &mut Context<Self>) {
@@ -493,7 +526,11 @@ impl OperonApp {
             Ok(()) => match edited.validate(&registry) {
                 Ok(()) => {
                     *flow = edited;
-                    self.status = format!("步骤 {step_id} 已替换，保存前校验通过");
+                    let saved = save_flows(&flows_path(), &self.flows);
+                    self.status = match saved {
+                        Ok(()) => format!("步骤 {step_id} 已替换并保存"),
+                        Err(error) => format!("已替换但保存失败：{error}"),
+                    };
                 }
                 Err(error) => self.status = format!("未保存：{error}"),
             },
@@ -508,10 +545,14 @@ impl OperonApp {
         };
         match flow.set_step_enabled(&step_id, enabled) {
             Ok(()) => {
-                self.status = format!(
-                    "步骤 {step_id} · {}",
-                    if enabled { "已启用" } else { "已停用" }
-                );
+                let saved = save_flows(&flows_path(), &self.flows);
+                self.status = match saved {
+                    Ok(()) => format!(
+                        "步骤 {step_id} · {}",
+                        if enabled { "已启用" } else { "已停用" }
+                    ),
+                    Err(error) => format!("已修改但保存失败：{error}"),
+                };
             }
             Err(error) => self.status = format!("{error}"),
         }
@@ -563,7 +604,10 @@ impl OperonApp {
         match flow.set_target_language(language) {
             Ok(()) => {
                 self.target_language = language.into();
-                self.status = format!("流程目标语言已改为 {language}");
+                self.status = match save_flows(&flows_path(), &self.flows) {
+                    Ok(()) => format!("流程目标语言已改为 {language} 并保存"),
+                    Err(error) => format!("已修改但保存失败：{error}"),
+                };
             }
             Err(error) => self.status = format!("{error}"),
         }

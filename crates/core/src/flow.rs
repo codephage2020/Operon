@@ -246,8 +246,7 @@ impl Flow {
 
 /// Build the three preset flows. These are the only flows P0 ships, and all of
 /// them must work with no external plugin installed.
-pub fn preset_flows(translate_instance: &str, target_language: &str) -> Vec<Flow> {
-    let mut flows = Vec::new();
+pub fn preset_flows(translate_instance: &str, target_language: &str) -> Vec<Flow> {    let mut flows = Vec::new();
     for (id, name, with_translate) in [
         ("screenshot-translate", "截图翻译", true),
         ("screenshot-ocr", "截图 OCR", false),
@@ -292,4 +291,33 @@ fn step(id: &str, instance: &str, optional: bool, language: &str) -> WorkflowSte
         enabled: true,
         timeout: None,
     }
+}
+
+/// Load saved flows, falling back to the presets when nothing was saved yet or
+/// the file cannot be read. A broken file must not leave the user with no tasks.
+pub fn load_flows(path: &std::path::Path, presets: Vec<Flow>) -> (Vec<Flow>, Option<String>) {
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<Vec<Flow>>(&bytes) {
+            Ok(flows) if !flows.is_empty() => (flows, None),
+            Ok(_) => (presets, Some("保存的流程为空，已恢复预设".into())),
+            Err(error) => (
+                presets,
+                Some(format!("流程文件无法解析，已恢复预设：{error}")),
+            ),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (presets, None),
+        Err(error) => (presets, Some(format!("无法读取流程文件：{error}"))),
+    }
+}
+
+/// Persist flows. Keys live in the Keychain, so the file holds only step
+/// definitions and language settings.
+pub fn save_flows(path: &std::path::Path, flows: &[Flow]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建流程目录：{error}"))?;
+    }
+    let json = serde_json::to_vec_pretty(flows)
+        .map_err(|error| format!("无法序列化流程：{error}"))?;
+    std::fs::write(path, json).map_err(|error| format!("无法写入流程文件：{error}"))
 }

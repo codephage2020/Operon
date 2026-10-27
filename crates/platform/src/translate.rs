@@ -67,7 +67,13 @@ impl CapabilityExecutor for HttpTranslator {
                 language_code(target)
             ),
         ];
-        if let Some(key) = context.config.get("api_key") {
+        // Built-in services keep their key in the Keychain too, so a key typed
+        // in the UI is used without ever entering the flow file.
+        let stored_key = context
+            .secrets
+            .as_ref()
+            .and_then(|resolver| resolver.resolve("translate", "api_key"));
+        if let Some(key) = context.config.get("api_key").or(stored_key.as_ref()) {
             arguments.extend(["--data-urlencode".into(), format!("key={key}")]);
         }
         let output = tokio::process::Command::new("/usr/bin/curl")

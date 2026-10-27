@@ -57,6 +57,37 @@ impl PluginProcess {
             .unwrap_or_default()
     }
 
+    /// Attach stored secrets to the config the plugin receives. Values never
+    /// come from the flow file, so an exported flow cannot leak a credential.
+    fn resolved_config(
+        &self,
+        context: &ExecutionContext,
+    ) -> std::collections::BTreeMap<String, String> {
+        let mut config = context.config.clone();
+        if let Some(resolver) = &context.secrets {
+            // Every field any capability declared, plus the conventional key
+            // name that single-service plugins use.
+            let mut fields: Vec<&str> = self
+                .manifest
+                .capabilities
+                .iter()
+                .flat_map(|capability| capability.permissions.iter())
+                .map(String::as_str)
+                .collect();
+            fields.push("api_key");
+            for field in fields {
+                if config.contains_key(field) {
+                    // An explicit (non-secret) flow value wins over the store.
+                    continue;
+                }
+                if let Some(secret) = resolver.resolve(&self.manifest.id, field) {
+                    config.insert(field.to_string(), secret);
+                }
+            }
+        }
+        config
+    }
+
     async fn child(&self) -> Result<Child, CapabilityError> {
         if self.manifest.protocol != PROTOCOL_VERSION {
             return Err(CapabilityError::Unavailable(format!(
@@ -144,7 +175,7 @@ impl CapabilityExecutor for PluginProcess {
             id: uuid::Uuid::new_v4().to_string(),
             capability_id: self.capability_id(&context),
             input,
-            config: context.config.clone(),
+            config: self.resolved_config(&context),
         };
         let mut child = self.child().await?;
         let result = self.execute_child(&mut child, &request, &context).await;

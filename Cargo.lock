@@ -3311,6 +3311,7 @@ dependencies = [
  "objc2-speech",
  "objc2-vision",
  "operon-core",
+ "security-framework",
  "serde",
  "serde_json",
  "tokio",

@@ -36,6 +36,7 @@ fn execution_context(cancellation: CancellationToken) -> ExecutionContext {
         config: BTreeMap::new(),
         cancellation,
         events: None,
+        secrets: None,
     }
 }
 
@@ -127,6 +128,58 @@ async fn real_echo_plugin_succeeds_and_uses_context_capability() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("wrong-capability"));
+}
+
+#[tokio::test]
+async fn secrets_are_resolved_into_plugin_config_without_touching_the_request_file() {
+    struct Stored;
+    impl SecretResolver for Stored {
+        fn resolve(&self, instance_id: &str, key: &str) -> Option<String> {
+            (instance_id == "test.echo" && key == "api_key").then(|| "sk-test-value".into())
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    // Echo the received config back through the error channel so the test can
+    // assert on exactly what the plugin was handed.
+    script(
+        directory.path(),
+        "plugin",
+        "#!/bin/sh\nread line\nprintf '%s\\n' \"$line\" > received.json\necho '{\"protocol\":1,\"id\":\"x\",\"output\":null,\"error\":\"stop\"}'\n",
+    );
+    let mut context = execution_context(CancellationToken::default());
+    context.secrets = Some(std::sync::Arc::new(Stored));
+    let _ = PluginProcess::new(manifest("plugin"), directory.path().to_path_buf())
+        .execute(text(), context)
+        .await;
+    let received: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("received.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(received["config"]["api_key"], "sk-test-value");
+    // The manifest and the request itself carry no credential material.
+    assert!(!serde_json::to_string(&manifest("plugin"))
+        .unwrap()
+        .contains("sk-test"));
+}
+
+#[tokio::test]
+async fn missing_secret_leaves_config_untouched() {
+    let directory = tempfile::tempdir().unwrap();
+    script(
+        directory.path(),
+        "plugin",
+        "#!/bin/sh\nread line\nprintf '%s\\n' \"$line\" > received.json\necho '{\"protocol\":1,\"id\":\"x\",\"output\":null,\"error\":\"stop\"}'\n",
+    );
+    let context = execution_context(CancellationToken::default());
+    let _ = PluginProcess::new(manifest("plugin"), directory.path().to_path_buf())
+        .execute(text(), context)
+        .await;
+    let received: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("received.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(received["config"].get("api_key").is_none());
 }
 
 #[tokio::test]

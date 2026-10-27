@@ -189,6 +189,27 @@ pub struct ExecutionContext {
     pub config: BTreeMap<String, String>,
     pub cancellation: CancellationToken,
     pub events: Option<UnboundedSender<RunEvent>>,
+    /// Loads secret config values (API keys etc.) at execution time so they are
+    /// never persisted in flows, logs or exports.
+    pub secrets: Option<Arc<dyn SecretResolver>>,
+}
+
+/// Resolves a secret for a plugin instance and config field. Returns `None`
+/// when nothing is stored, letting a step report "未配置" rather than sending an
+/// empty credential.
+pub trait SecretResolver: Send + Sync {
+    fn resolve(&self, instance_id: &str, key: &str) -> Option<String>;
+}
+
+impl std::fmt::Debug for ExecutionContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never format config contents: it may carry a credential.
+        formatter
+            .debug_struct("ExecutionContext")
+            .field("config_fields", &self.config.len())
+            .field("cancelled", &self.cancellation.is_cancelled())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, Default)]

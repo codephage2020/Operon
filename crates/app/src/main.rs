@@ -131,6 +131,10 @@ struct OperonApp {
     result_window: Option<gpui::WindowHandle<results::ResultView>>,
     flows: Vec<Flow>,
     selected_flow: usize,
+    /// Instance whose credential is being edited, plus the value in progress.
+    /// The typed value lives only in memory and is cleared after saving.
+    secret_target: Option<String>,
+    secret_input: gpui::Entity<TextInput>,
 }
 
 impl OperonApp {
@@ -168,6 +172,8 @@ impl OperonApp {
             result_window: None,
             flows,
             selected_flow: 0,
+            secret_target: None,
+            secret_input: cx.new(|cx| TextInput::new(cx, "粘贴 API 密钥…", false)),
         }
     }
 
@@ -512,8 +518,46 @@ impl OperonApp {
         cx.notify();
     }
 
-    fn set_flow_language(&mut self, language: &str, cx: &mut Context<Self>) {
-        let Some(flow) = self.flows.get_mut(self.selected_flow) else {
+    fn edit_secret(&mut self, instance_id: String, cx: &mut Context<Self>) {
+        self.secret_target = Some(instance_id);
+        self.secret_input
+            .update(cx, |input, cx| input.set_content(String::new(), cx));
+        cx.notify();
+    }
+
+    fn save_secret(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(instance_id) = self.secret_target.clone() else {
+            return;
+        };
+        let value = self.secret_input.read(cx).content().trim().to_string();
+        if value.is_empty() {
+            self.status = "密钥为空，未保存".into();
+            cx.notify();
+            return;
+        }
+        match self.controller.save_secret(&instance_id, "api_key", &value) {
+            Ok(()) => {
+                // Drop the typed value immediately; the Keychain holds it now.
+                self.secret_input
+                    .update(cx, |input, cx| input.set_content(String::new(), cx));
+                self.secret_target = None;
+                self.status = format!("已保存 {instance_id} 的密钥到钥匙串");
+                window.focus(&self.focus_handle);
+            }
+            Err(error) => self.status = error,
+        }
+        cx.notify();
+    }
+
+    fn forget_secret(&mut self, instance_id: String, cx: &mut Context<Self>) {
+        match self.controller.forget_secret(&instance_id) {
+            Ok(()) => self.status = format!("已删除 {instance_id} 的密钥"),
+            Err(error) => self.status = error,
+        }
+        cx.notify();
+    }
+
+    fn set_flow_language(&mut self, language: &str, cx: &mut Context<Self>) {        let Some(flow) = self.flows.get_mut(self.selected_flow) else {
             return;
         };
         match flow.set_target_language(language) {
@@ -615,6 +659,165 @@ impl Focusable for OperonApp {
 }
 
 impl OperonApp {
+    /// Credential storage for plugins that need an API key. Values go to the
+    /// Keychain and never into flow files, logs or exports.
+    fn credentials_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // The built-in translator is always present and can take an optional
+        // key, so it is listed alongside installed plugins.
+        let mut services: Vec<(String, String)> = vec![(
+            "translate".into(),
+            "MyMemory 翻译（内置）".into(),
+        )];
+        services.extend(self.controller.plugins().into_iter().map(|plugin| {
+            (
+                format!("{}:default", plugin.manifest.id),
+                plugin.manifest.name.clone(),
+            )
+        }));
+        div()
+            .p_5()
+            .bg(rgb(0xffffff))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(0xe0e7e3))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("密钥"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x63746c))
+                    .child("密钥保存在系统钥匙串，不写入流程、导出文件或日志。"),
+            )
+            .children(services.into_iter().map(|(instance_id, name)| {
+                let configured = self.controller.secret_configured(&instance_id);
+                let editing = self.secret_target.as_deref() == Some(instance_id.as_str());
+                let edit_target = instance_id.clone();
+                let forget_target = instance_id.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(format!("{name} · API 密钥")),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(if configured {
+                                                rgb(0x176b5b)
+                                            } else {
+                                                rgb(0x8a6d1f)
+                                            })
+                                            .child(if configured {
+                                                "已配置"
+                                            } else {
+                                                "未配置"
+                                            }),
+                                    )
+                                    .child(
+                                        self.action(
+                                            if configured { "替换" } else { "配置" },
+                                            format!("secret-edit-{instance_id}"),
+                                            !configured,
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.edit_secret(edit_target.clone(), cx)
+                                            }),
+                                        ),
+                                    )
+                                    .when(configured, |this| {
+                                        this.child(
+                                            self.action(
+                                                "删除",
+                                                format!("secret-forget-{instance_id}"),
+                                                false,
+                                            )
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.forget_secret(
+                                                        forget_target.clone(),
+                                                        cx,
+                                                    )
+                                                }),
+                                            ),
+                                        )
+                                    }),
+                            ),
+                    )
+                    .when(editing, |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "secret-field-{instance_id}"
+                                        )))
+                                        .child(self.secret_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            self.action(
+                                                "保存",
+                                                format!("secret-save-{instance_id}"),
+                                                true,
+                                            )
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.save_secret(window, cx)
+                                                }),
+                                            ),
+                                        )
+                                        .child(
+                                            self.action(
+                                                "取消",
+                                                format!("secret-cancel-{instance_id}"),
+                                                false,
+                                            )
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.secret_target = None;
+                                                    this.secret_input.update(cx, |input, cx| {
+                                                        input.set_content(String::new(), cx)
+                                                    });
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        ),
+                                ),
+                        )
+                    })
+            }))
+    }
+
     /// Step cards for the selected flow. Required steps expose no disable
     /// control, matching the rule that a flow cannot be saved unrunnable.
     fn flow_steps(&self, flow: &Flow, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -988,6 +1191,7 @@ impl Render for OperonApp {
                                 .child("第三方插件以本地代码运行，请确认来源可信"),
                         ),
                 )
+                .child(self.credentials_card(cx))
                 .child(
                     div()
                         .p_5()

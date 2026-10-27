@@ -1,6 +1,7 @@
 mod capture;
 mod hotkeys;
 mod ocr;
+mod secrets;
 mod speech;
 mod translate;
 
@@ -9,5 +10,6 @@ pub use capture::{
 };
 pub use hotkeys::{Hotkey, register_all};
 pub use ocr::VisionOcr;
+pub use secrets::{delete_secret, get_secret, has_secret, is_secret_field, set_secret};
 pub use speech::{MacSpeechRecognizer, SpeechRecognitionEvent};
 pub use translate::{HttpTranslator, language_code};

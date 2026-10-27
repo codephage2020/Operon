@@ -41,8 +41,10 @@ impl TextInput {
             multiline,
         }
     }
-    pub fn set_content(&mut self, content: String, cx: &mut Context<Self>) {
-        if self.content.as_ref() == content {
+    pub fn content(&self) -> String {
+        self.content.to_string()
+    }
+    pub fn set_content(&mut self, content: String, cx: &mut Context<Self>) {        if self.content.as_ref() == content {
             return;
         }
         self.content = content.into();

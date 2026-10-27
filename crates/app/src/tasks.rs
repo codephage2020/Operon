@@ -16,6 +16,15 @@ pub fn default_plugin_root() -> std::path::PathBuf {
         })
 }
 
+/// Reads plugin credentials from the macOS Keychain at execution time.
+struct KeychainSecrets;
+
+impl SecretResolver for KeychainSecrets {
+    fn resolve(&self, instance_id: &str, key: &str) -> Option<String> {
+        operon_platform::get_secret(instance_id, key)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum TaskEvent {
     Steps(Vec<StepRecord>),
@@ -141,6 +150,20 @@ impl TaskController {
         self.translation.lock().expect("translation binding").clone()
     }
 
+    /// Save a plugin credential to the Keychain. The value is never written to
+    /// disk by this app and is not kept in any flow or log.
+    pub fn save_secret(&self, instance_id: &str, key: &str, value: &str) -> Result<(), String> {
+        operon_platform::set_secret(instance_id, key, value)
+    }
+
+    pub fn secret_configured(&self, instance_id: &str) -> bool {
+        operon_platform::has_secret(instance_id, "api_key")
+    }
+
+    pub fn forget_secret(&self, instance_id: &str) -> Result<(), String> {
+        operon_platform::delete_secret(instance_id, "api_key")
+    }
+
     /// Enabled text→text instances the translate step could use. Switching
     /// requires an explicit user action; nothing selects a service by itself.
     pub fn translation_choices(&self) -> Vec<(String, TranslationBinding)> {
@@ -220,7 +243,9 @@ impl TaskController {
                             let _ = live.send(TaskEvent::StepChanged(step));
                         }
                     });
-                    WorkflowEngine::new(registry).with_events(step_events)
+                    WorkflowEngine::new(registry)
+                        .with_events(step_events)
+                        .with_secrets(Arc::new(KeychainSecrets))
                 };
                 let (mut workflow, input) = if task == "text" {
                     (
@@ -326,7 +351,9 @@ impl TaskController {
                             let _ = live.send(TaskEvent::StepChanged(step));
                         }
                     });
-                    WorkflowEngine::new(registry).with_events(step_events)
+                    WorkflowEngine::new(registry)
+                        .with_events(step_events)
+                        .with_secrets(Arc::new(KeychainSecrets))
                 }
                 .retry(&workflow, output, "translate", cancellation)
                 .await
@@ -464,6 +491,7 @@ async fn speech(
                                 config: [("target_language".into(), language.clone())].into(),
                                 cancellation: cancellation.clone(),
                                 events: None,
+                                secrets: None,
                             };
                             match translator.execute(Payload::Text(data), context).await {
                                 Ok(Payload::Text(result)) => {

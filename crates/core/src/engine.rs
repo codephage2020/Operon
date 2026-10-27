@@ -120,6 +120,8 @@ pub struct WorkflowEngine {
     /// Optional live step updates, so the UI can show progress instead of
     /// waiting for the whole run to finish.
     events: Option<mpsc::UnboundedSender<RunEvent>>,
+    /// Supplies credentials to executors without persisting them in flows.
+    secrets: Option<Arc<dyn SecretResolver>>,
 }
 
 impl WorkflowEngine {
@@ -128,11 +130,17 @@ impl WorkflowEngine {
             registry,
             history: Mutex::new(Vec::new()),
             events: None,
+            secrets: None,
         }
     }
 
     pub fn with_events(mut self, events: mpsc::UnboundedSender<RunEvent>) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    pub fn with_secrets(mut self, secrets: Arc<dyn SecretResolver>) -> Self {
+        self.secrets = Some(secrets);
         self
     }
 
@@ -265,6 +273,7 @@ impl WorkflowEngine {
                 config,
                 cancellation: cancellation.clone(),
                 events: Some(events.clone()),
+                secrets: self.secrets.clone(),
             };
             let executing = executor.execute(current.clone(), context);
             let result = match step.timeout_or_default() {
